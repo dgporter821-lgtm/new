@@ -1,94 +1,60 @@
 export const config = { runtime: "edge" };
 
-const BLOCKED_HEADERS = new Set([
+const TARGET = "https://ns.mgiwqlpvxy.sbs:443";
+
+const BLOCKED_REQ = new Set([
   "host", "connection", "keep-alive", "te", "trailer",
   "transfer-encoding", "upgrade", "forwarded",
   "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
   "proxy-authenticate", "proxy-authorization",
 ]);
 
-const BLOCKED_RESPONSE_HEADERS = new Set([
+const BLOCKED_RES = new Set([
   "transfer-encoding", "connection", "keep-alive",
 ]);
 
-function buildTargetUrl(reqUrl, base) {
-  const url = new URL(reqUrl);
-  return `${base}${url.pathname}${url.search}`;
-}
+export default async function handler(req) {
+  const url = new URL(req.url);
+  const targetUrl = TARGET + url.pathname + url.search;
 
-function filterRequestHeaders(reqHeaders) {
   const headers = new Headers();
   let clientIp = null;
 
-  for (const [k, v] of reqHeaders) {
+  for (const [k, v] of req.headers) {
     const key = k.toLowerCase();
-    if (BLOCKED_HEADERS.has(key)) continue;
+    if (BLOCKED_REQ.has(key)) continue;
     if (key.startsWith("x-vercel-")) continue;
     if (key === "x-real-ip") { clientIp = v; continue; }
     if (key === "x-forwarded-for") { if (!clientIp) clientIp = v; continue; }
     headers.set(k, v);
   }
-
   if (clientIp) headers.set("x-forwarded-for", clientIp);
-  return headers;
-}
-
-function filterResponseHeaders(upstreamHeaders) {
-  const headers = new Headers();
-  for (const [k, v] of upstreamHeaders) {
-    if (BLOCKED_RESPONSE_HEADERS.has(k.toLowerCase())) continue;
-    headers.set(k, v);
-  }
-  return headers;
-}
-
-function isBodyAllowed(method) {
-  return method !== "GET" && method !== "HEAD";
-}
-
-export default async function handler(req) {
-  const base = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-
-  if (!base) {
-    return new Response(JSON.stringify({ error: "Service misconfigured" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  let targetUrl;
-  try {
-    targetUrl = buildTargetUrl(req.url, base);
-  } catch {
-    return new Response("Invalid request URL", { status: 400 });
-  }
 
   const method = req.method;
-  const reqHeaders = filterRequestHeaders(req.headers);
 
-  const fetchOptions = {
-    method,
-    headers: reqHeaders,
-    redirect: "manual",
-    ...(isBodyAllowed(method) && {
-      body: req.body,
-      duplex: "half",
-    }),
-  };
-
-  let upstream;
   try {
-    upstream = await fetch(targetUrl, fetchOptions);
-  } catch (err) {
-    const msg = err instanceof TypeError ? "Upstream unreachable" : "Bad gateway";
-    return new Response(msg, { status: 502 });
+    const upstream = await fetch(targetUrl, {
+      method,
+      headers,
+      redirect: "manual",
+      ...(method !== "GET" && method !== "HEAD" && {
+        body: req.body,
+        duplex: "half",
+      }),
+    });
+
+    const out = new Headers();
+    for (const [k, v] of upstream.headers) {
+      if (BLOCKED_RES.has(k.toLowerCase())) continue;
+      out.set(k, v);
+    }
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: out,
+    });
+  } catch {
+    return new Response("Bad gateway", { status: 502 });
   }
-
-  const respHeaders = filterResponseHeaders(upstream.headers);
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: respHeaders,
-  });
 }
